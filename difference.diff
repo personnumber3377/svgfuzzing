@@ -1,0 +1,266 @@
+diff --git a/afl-fuzz.c b/afl-fuzz.c
+index 88db5d5..e95e77f 100644
+--- a/afl-fuzz.c
++++ b/afl-fuzz.c
+@@ -3062,15 +3062,11 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
+   start_us = get_cur_time_us();
+ 
+   for (stage_cur = 0; stage_cur < stage_max; stage_cur++) {
+-
+     u32 cksum;
+ 
+     if (!first_run && !(stage_cur % stats_update_freq)) show_stats();
+-
+     write_to_testcase(use_mem, q->len);
+-
+     fault = run_target(argv, use_tmout);
+-
+     /* stop_soon is set by the handler for Ctrl+C. When it's pressed,
+        we want to bail out quickly. */
+ 
+@@ -3184,7 +3180,7 @@ static void check_map_coverage(void) {
+ 
+ /* Perform dry run of all test cases to confirm that the app is working as
+    expected. This is done only for the initial inputs, and only once. */
+-
++int say_once = 0;
+ static void perform_dry_run(char** argv) {
+ 
+   struct queue_entry* q = queue;
+@@ -3200,7 +3196,6 @@ static void perform_dry_run(char** argv) {
+     u8* fn = strrchr(q->fname, '\\') + 1;
+ 
+     ACTF("Attempting dry run with '%s'...", fn);
+-
+     fd = open(q->fname, O_RDONLY | O_BINARY);
+     if (fd < 0) PFATAL("Unable to open '%s'", q->fname);
+ 
+@@ -3210,10 +3205,8 @@ static void perform_dry_run(char** argv) {
+       FATAL("Short read from '%s'", q->fname);
+ 
+     close(fd);
+-
+     res = calibrate_case(argv, q, use_mem, 0, 1);
+     ck_free(use_mem);
+-
+     if (stop_soon) return;
+ 
+     if (res == crash_mode || res == FAULT_NOBITS)
+@@ -3244,28 +3237,49 @@ static void perform_dry_run(char** argv) {
+             cal_failures++;
+             break;
+           }
+-
+-          SAYF("\n" cLRD "[-] " cRST
++          if (!(say_once)) {
++            SAYF("\n" cLRD "[-] " cRST
+                "The program took more than %u ms to process one of the initial test cases.\n"
+                "    In WinAFL, this error could also mean incorrect instrumentation params.\n"
+                "    Please make sure instrumentation runs correctly using the debug mode\n"
+                "    (see the README) before attempting to run afl-fuzz.\n", exec_tmout);
++            say_once = 1;
++          }
++          
+ 
+-          FATAL("Test case '%s' results in a timeout", fn);
++          
+ 
+         } else {
+ 
+-          SAYF("\n" cLRD "[-] " cRST
++
++          if (!(say_once)) {
++            SAYF("\n" cLRD "[-] " cRST
+                "The program took more than %u ms to process one of the initial test cases.\n"
+                "    This is bad news; raising the limit with the -t option is possible, but\n"
+                "    will probably make the fuzzing process extremely slow.\n\n"
+ 
+                "    If this test case is just a fluke, the other option is to just avoid it\n"
+                "    altogether, and find one that is less of a CPU hog.\n", exec_tmout);
++            say_once = 1;
++          }
+ 
+-          FATAL("Test case '%s' results in a timeout", fn);
++          
++
++          
+ 
+         }
++        if (!getenv("AFL_IGNORE_SEED_PROBLEMS")) {
++          FATAL("Test case '%s' results in a timeout", fn);
++        }
++
++        //if (skip_crashes) {
++        WARNF("Test case results in a timeout (skipping)");
++        q->cal_failed = CAL_CHANCES;
++        cal_failures++;
++        break;
++        //}
++        //break;
++        
+ 
+       case FAULT_CRASH:  
+ 
+@@ -3340,7 +3354,7 @@ static void perform_dry_run(char** argv) {
+     }
+ 
+     if (q->var_behavior) WARNF("Instrumentation output varies across runs.");
+-
++    ACTF("Jumping to the next thing...");
+     q = q->next;
+ 
+   }
+@@ -5639,7 +5653,7 @@ static u8 fuzz_one(char** argv) {
+    * TRIMMING *
+    ************/
+ 
+-  if (!dumb_mode && !queue_cur->trim_done) {
++  if (!dumb_mode && !queue_cur->trim_done && (!getenv("AFL_DISABLE_TRIM"))) {
+ 
+     u8 res = trim_case(argv, queue_cur, in_buf);
+ 
+@@ -6657,6 +6671,25 @@ skip_extras:
+ 
+ havoc_stage:
+ 
++
++  if (getenv("AFL_ONLY_CUSTOM")) {
++    //fprintf(stderr, "Now running the bullshit thing...");
++    //SAYF("Abandoning havoc, because custom only was specified....");
++
++    /* Force UI update */
++    show_stats();
++    /* Skip other stages */
++    ret_val = 0;
++    goto abandon_entry;
++  }/* else {
++    while (1) {
++       SAYF("POOPOOOO");
++    }
++    // SAYF("POOPOOOO");
++  }
++  */
++
++
+   stage_cur_byte = -1;
+ 
+   /* The havoc stage mutation code is also invoked when splicing files; if the
+@@ -8121,14 +8154,61 @@ int getopt(int argc, char **argv, char *optstring) {
+   }
+ }
+ 
++
++
++void PrintLastError(void)
++{
++    DWORD dwError = GetLastError();
++    LPSTR errorText = NULL;
++
++    // Format the error message based on the error code
++    FormatMessageA(
++        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
++        NULL, 
++        dwError, 
++        0, 
++        (LPSTR)&errorText, 
++        0, 
++        NULL
++    );
++
++    if (errorText) {
++        SAYF("Error 0x%lX: %s\n", dwError, errorText);
++        LocalFree(errorText);
++    } else {
++        SAYF("Failed to retrieve error message.\n");
++    }
++}
++
++
++
+ /* This routine is designed to load user-defined library for custom test cases processing */
+ void load_custom_library(const char *libname)
+ {
+   int result = 0;
+   SAYF("Loading custom winAFL server library\n");
+-  HMODULE hLib = LoadLibraryEx(libname, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+-  if (hLib == NULL)
+-    FATAL("Unable to load custom server library, GetLastError = 0x%x", GetLastError());
++  // HMODULE hLib = LoadLibraryEx(libname, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
++  // HMODULE hLib = LoadLibraryEx(libname, NULL, NULL); // The previous shit won't work when loading the DLL. Just do something like this.
++  // C:\Users\elsku\winafl\winafl\python_mutator.dll
++  // C:\\Users\\elsku\\winafl\\testing\\python_mutator.dll
++  // HMODULE hLib = LoadLibraryEx("C:\\Users\\elsku\\winafl\\winafl\\python_mutator.dll", NULL, NULL);
++  // HMODULE hLib = LoadLibraryEx("C:\\Users\\elsku\\winafl\\testing\\python_mutator.dll", NULL, NULL);
++  // C:\\Users\\elsku\\winafl\\winafl\\build\\bin\\Release\\
++
++  // HMODULE hLib = LoadLibraryEx("C:\\Users\\elsku\\winafl\\winafl\\build\\bin\\Release\\python_mutator.dll", NULL, NULL);
++
++  // C:\\Users\\elsku\\source\\repos\\gdiplusharness\\python_mutator.dll
++  SAYF("Using absolute path to search for dll...\n");
++  // HMODULE hLib = LoadLibraryEx("C:\\Users\\elsku\\source\\repos\\gdiplusharness\\python_mutator.dll", NULL, NULL);
++  // C:\Users\elsku\winafl\winafl
++  HMODULE hLib = LoadLibraryEx("C:\\Users\\elsku\\winafl\\winafl\\python_mutator.dll", NULL, NULL);
++
++
++  if (hLib == NULL) {
++    PrintLastError();
++    FATAL("FUCK!\n");
++    //FATAL("Unable to load custom server library, GetLastError = 0x%x", GetLastError());
++  }
+ 
+   /* init the custom server */
+   // Get pointer to user-defined server initialization function using GetProcAddress:
+diff --git a/winafl-cmin.py b/winafl-cmin.py
+index e6e05a8..1523ddc 100644
+--- a/winafl-cmin.py
++++ b/winafl-cmin.py
+@@ -28,6 +28,7 @@ import sys
+ import time
+ import re
+ from textwrap import dedent, wrap
++import atexit
+ 
+ nul = open(os.devnull, 'wb')
+ 
+@@ -116,10 +117,31 @@ class AFLShowMapWorker(object):
+         # Make sure there isn't a trace that hasn't been properly cleaned
+         if os.path.isfile(trace_name):
+             os.remove(trace_name)
+-
++        #print("Here are the options: "+str(opts))
++        #print("Joined: "+str(" ".join(opts)))
+         p = subprocess.Popen(opts, close_fds = True)
++        #atexit.register(p.terminate)
++        '''
++        @atexit.register
++        def kill_process():
++            try:
++                #print("fefeeeeeeeeeeeeeeeeeeeeeeeeeee"*2)
++                #print("killing the thing...")
++                p.terminate()
++            except OSError:
++                #print("fefeeeeeeeeeeeeeeeeeeeeeeeeeee"*200)
++                pass #ignore the error.  The OSError doesn't seem to be documented(?)
++                     #as such, it *might* be better to process.poll() and check for 
++                     #`None` (meaning the process is still running), but that 
++                     #introduces a race condition.  I'm not sure which is better,
++                     #hopefully someone that knows more about this than I do can 
++                     #comment.
++        '''
++
+         p.wait()
+ 
++
++
+         if fileread is not None:
+             # Clean it up
+             os.remove(fileread)
+@@ -469,7 +491,7 @@ def run_all_inputs(args, inputs):
+         # by your liking by specifying -f path/foo.ext we have to set the pool
+         # size to 1 in order to make it work.
+         nprocesses = 1
+-
++    # nprocesses = 1
+     # Record stats about the original input set.
+     #  The aggregated size of every input files.
+     totalsize = 0
